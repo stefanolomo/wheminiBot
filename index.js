@@ -162,6 +162,8 @@ client.on('message_create', async (msg) => {
 
             // Obtiene la sesión y envía el mensaje a la IA
             const sesion = await getSesion(chatId);
+
+            // Generamos la respuesta
             const result = await sesion.sendMessage(consulta);
             const text = result.response.text();
 
@@ -173,6 +175,7 @@ client.on('message_create', async (msg) => {
     } catch (error) {
         console.error("❌ Error:", error);
         if (msg.body.startsWith('!bot')) {
+            // A veces el error viene porque Gemini bloqueó la respuesta (aunque con BLOCK_NONE es raro)
             await msg.reply("🤖 Whemini: ⚠️ Ocurrió un error procesando tu mensaje.");
         }
     }
