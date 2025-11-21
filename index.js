@@ -181,4 +181,12 @@ client.on('message_create', async (msg) => {
     }
 });
 
-client.initialize();
+// --- ESPERA DE SEGURIDAD PARA INTERNET ---
+const SEGUNDOS_DE_ESPERA = 10; // Esperamos 10s para estar seguros
+
+console.log(`⏳ Esperando ${SEGUNDOS_DE_ESPERA} segundos para asegurar conexión a internet...`);
+
+setTimeout(() => {
+    console.log("🚀 Iniciando conexión con WhatsApp...");
+    client.initialize();
+}, SEGUNDOS_DE_ESPERA * 1000);
