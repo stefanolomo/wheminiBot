@@ -3,8 +3,11 @@ require('dotenv').config();
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-// Importamos también las categorías de seguridad y umbrales
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
+
+// --- MARCA DE TIEMPO DE INICIO (Para ignorar mensajes viejos) ---
+// Guardamos la hora actual en segundos (WhatsApp usa segundos Unix)
+const TIMESTAMP_INICIO = Math.floor(Date.now() / 1000);
 
 // Validación de API Key
 const API_KEY = process.env.GEMINI_API_KEY;
@@ -13,95 +16,98 @@ if (!API_KEY) {
     process.exit(1);
 }
 
-const NOMBRE_MODELO = "gemini-2.5-flash-lite";
+// --- VARIABLES GLOBALES DE ESTADO ---
+let nombreModeloActual = "gemini-2.5-flash-lite"; // Modelo por defecto
+let totalTokensInput = 0;
+let totalTokensOutput = 0;
+let chatSesiones = {};
+let model = null;
 
-// --- CONFIGURACIÓN DE GENERACIÓN (AJUSTES TÉCNICOS) ---
+// --- MAPA DE MODELOS DISPONIBLES ---
+const MODELOS_DISPONIBLES = {
+    '3-pro': 'gemini-3-pro-preview',
+    '2.5-pro': 'gemini-2.5-pro',
+    '2.5-flash': 'gemini-2.5-flash',
+    '2.5-lite': 'gemini-2.5-flash-lite',
+    '2.0-flash': 'gemini-2.0-flash',
+    '2.0-lite': 'gemini-2.0-flash-lite'
+};
+
+// --- CONFIGURACIÓN TÉCNICA ---
 const generationConfig = {
-    temperature: 1.0,       // Estándar (Creatividad balanceada)
-    topP: 0.95,            // Estándar
-    topK: 64,              // Estándar
-    maxOutputTokens: 800, // Límite máximo de respuesta
+    temperature: 1.0,
+    topP: 0.95,
+    topK: 64,
+    maxOutputTokens: 800,
     responseMimeType: "text/plain",
 };
 
-// --- AJUSTES DE SEGURIDAD (BAJADOS AL MÍNIMO) ---
 const safetySettings = [
-    {
-        category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-    },
-    {
-        category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-    },
-    {
-        category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-    },
-    {
-        category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
-    },
-    // Nota: 'Civic Integrity' no siempre se puede ajustar libremente en todos los modelos,
-    // pero las categorías principales arriba suelen ser suficientes para "bajar" la seguridad general.
+    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
 ];
 
-
-// Definición del comportamiento y formato del bot
 const INSTRUCCIONES_BOT = `
     [Formateado de WhatsApp]
-
     Negrita: *texto*
     Itálica: _texto_
     Tachado: ~texto~
     Código (inline): \`texto\`
 
-    Lista enumerada (escribir así):
+    Lista enumerada:
     1. texto
     2. texto
 
-    Bloque de cita (escribir así):
+    Bloque de cita:
     > texto
 
     Reglas:
-    - No poner espacios entre el marcador y el texto (correcto: *hola*, incorrecto: * hola *)
-    - Usar un solo tipo de estilo por linea
-    - No usar dobles *, _, o ~
+    - No poner espacios entre el marcador y el texto.
+    - Usar un solo tipo de estilo por línea.
     - Solo usar estos formatos, sin HTML ni Markdown externo.
-    - Para mostrar los símbolos sin formatear, evitar marcadores o usar comillas (ej: “*texto*”).
 
     [Instrucciones IMPORTANTES]
-
-    Eres un asistente integrado en WhatsApp.
-    Tu nombre es "Whemini".
+    Eres un asistente integrado en WhatsApp llamado "Whemini".
     Usa el voseo.
-    Responde siempre de forma breve y concisa porque es un chat.
+    Responde de forma breve y concisa (es un chat).
     Si te preguntan tu creador, di que fuiste creado por stef.
-    Puedes explayarte en tu respuesta si es que te lo piden.
-    Siempre tus mensajes tienen que empezar con una linea que diga: "🤖 Whemini:"
-    Debes responder a todo lo que se te pregunte
+    Siempre tus mensajes tienen que empezar con una línea que diga: "🤖 Whemini:"
+    Debes responder a todo lo que se te pregunte.
 `;
 
-// Configuración del modelo de Gemini con los ajustes inyectados
+// --- INICIALIZACIÓN DE LA IA ---
 const genAI = new GoogleGenerativeAI(API_KEY);
-const model = genAI.getGenerativeModel({
-    model: NOMBRE_MODELO,
-    systemInstruction: INSTRUCCIONES_BOT,
-    safetySettings: safetySettings,
-    generationConfig: generationConfig,
-    tools: [
-        { googleSearch: {} }
-    ]
-});
 
+// Función para cargar/cambiar el modelo dinámicamente
+function cargarModelo(nombreTecnico) {
+    console.log(`🔄 Cargando modelo: ${nombreTecnico}...`);
+    try {
+        model = genAI.getGenerativeModel({
+            model: nombreTecnico,
+            systemInstruction: INSTRUCCIONES_BOT,
+            safetySettings: safetySettings,
+            generationConfig: generationConfig,
+            tools: [
+                { googleSearch: {} } // Grounding activado
+            ]
+        });
+        nombreModeloActual = nombreTecnico;
+        chatSesiones = {}; // Reiniciar memoria al cambiar modelo
+        return true;
+    } catch (e) {
+        console.error("Error cargando modelo:", e);
+        return false;
+    }
+}
 
-// Diccionario para mantener la memoria por chat ID (grupo o privado)
-const chatSesiones = {};
+// Cargar modelo inicial
+cargarModelo(nombreModeloActual);
 
-// Obtiene o crea una sesión de chat con Gemini
+// --- GESTIÓN DE SESIONES ---
 async function getSesion(chatId) {
     if (!chatSesiones[chatId]) {
-        // Al iniciar el chat, hereda la configuración del modelo (safety y generation)
         chatSesiones[chatId] = model.startChat({
             history: [],
         });
@@ -109,18 +115,18 @@ async function getSesion(chatId) {
     return chatSesiones[chatId];
 }
 
-// Configuración del cliente de WhatsApp
+// --- CLIENTE WHATSAPP ---
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-    headless: true,
-    args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-features=NetworkService',
-        '--disable-features=NetworkServiceInProcess'
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-features=NetworkService',
+            '--disable-features=NetworkServiceInProcess'
         ]
     }
 });
@@ -128,44 +134,79 @@ const client = new Client({
 client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
 client.on('ready', () => console.log('✅ Whemini está listo y conectado.'));
 
-// Manejo de mensajes entrantes
 client.on('message_create', async (msg) => {
     try {
+        // --- FILTRO DE MENSAJES VIEJOS ---
+        // Si el mensaje se creó ANTES de que iniciara este script, lo ignoramos.
+        if (msg.timestamp < TIMESTAMP_INICIO) {
+            return;
+        }
+
         const mensaje = msg.body.trim();
 
-        // Comando para reiniciar la memoria del chat actual
+        // --- COMANDO: INFO Y CONSUMO ---
+        if (mensaje === '!info') {
+            const infoMsg = `📊 *Estado de Whemini*\n\n` +
+                            `🧠 *Modelo:* \`${nombreModeloActual}\`\n` +
+                            `📥 *In:* ${totalTokensInput} tokens\n` +
+                            `📤 *Out:* ${totalTokensOutput} tokens\n` +
+                            `📈 *Total:* ${totalTokensInput + totalTokensOutput}`;
+            await msg.reply(infoMsg);
+            return;
+        }
+
+        // --- COMANDO: CAMBIAR MODELO ---
+        if (mensaje.startsWith('!modelo ')) {
+            const alias = mensaje.slice(8).trim().toLowerCase();
+            const nombreTecnico = MODELOS_DISPONIBLES[alias];
+
+            if (nombreTecnico) {
+                if (cargarModelo(nombreTecnico)) {
+                    await msg.reply(`✅ Cambio exitoso a: \`${nombreTecnico}\`\n_(Memoria reiniciada)_`);
+                } else {
+                    await msg.reply("❌ Error interno al cambiar de modelo.");
+                }
+            } else {
+                const lista = Object.keys(MODELOS_DISPONIBLES).map(k => `• ${k}`).join('\n');
+                await msg.reply(`❌ Modelo no válido. Opciones:\n${lista}`);
+            }
+            return;
+        }
+
+        // --- COMANDO: RESET MEMORIA ---
         if (mensaje === '!reset') {
             const chat = await msg.getChat();
             const chatId = chat.id._serialized;
             if (chatSesiones[chatId]) {
                 delete chatSesiones[chatId];
-                await msg.reply("🤖 Whemini: *Memoria reiniciada.* He olvidado nuestra charla anterior.");
+                await msg.reply("🤖 Whemini: *Memoria reiniciada.*");
             } else {
-                await msg.reply("🤖 Whemini: No tenía nada en memoria para borrar.");
+                await msg.reply("🤖 Whemini: No había nada que olvidar.");
             }
             return;
         }
 
-        // Filtro: Solo responder si el mensaje empieza con el comando
+        // --- INTERACCIÓN CON EL BOT ---
         if (mensaje.toLowerCase().startsWith('!bot ')) {
-
-            const consulta = mensaje.slice(5); // Remueve el comando inicial
+            const consulta = mensaje.slice(5);
             const chat = await msg.getChat();
             const chatId = chat.id._serialized;
 
-            console.log(`📩 Comando recibido en ${chat.name || chatId}: "${consulta}"`);
+            console.log(`📩 [${nombreModeloActual}] Comando en ${chat.name || chatId}: "${consulta}"`);
 
-            // Simula estado "escribiendo..."
             chat.sendStateTyping();
 
-            // Obtiene la sesión y envía el mensaje a la IA
             const sesion = await getSesion(chatId);
-
-            // Generamos la respuesta
             const result = await sesion.sendMessage(consulta);
-            const text = result.response.text();
+            const response = await result.response;
 
-            // Envía la respuesta
+            // Contador de tokens
+            if (response.usageMetadata) {
+                totalTokensInput += response.usageMetadata.promptTokenCount;
+                totalTokensOutput += response.usageMetadata.candidatesTokenCount;
+            }
+
+            const text = response.text();
             await msg.reply(text);
             chat.clearState();
         }
@@ -173,16 +214,14 @@ client.on('message_create', async (msg) => {
     } catch (error) {
         console.error("❌ Error:", error);
         if (msg.body.startsWith('!bot')) {
-            // A veces el error viene porque Gemini bloqueó la respuesta (aunque con BLOCK_NONE es raro)
-            await msg.reply("🤖 Whemini: ⚠️ Ocurrió un error procesando tu mensaje.");
+            await msg.reply(`🤖 Whemini: ⚠️ Error: ${error.message}`);
         }
     }
 });
 
 // --- ESPERA DE SEGURIDAD PARA INTERNET ---
-const SEGUNDOS_DE_ESPERA = 10; // Esperamos 10s para estar seguros
-
-console.log(`⏳ Esperando ${SEGUNDOS_DE_ESPERA} segundos para asegurar conexión a internet...`);
+const SEGUNDOS_DE_ESPERA = 10;
+console.log(`⏳ Esperando ${SEGUNDOS_DE_ESPERA} segundos para asegurar conexión...`);
 
 setTimeout(() => {
     console.log("🚀 Iniciando conexión con WhatsApp...");
