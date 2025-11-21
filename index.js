@@ -3,7 +3,8 @@ require('dotenv').config();
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+// Importamos también las categorías de seguridad y umbrales
+const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 
 // Validación de API Key
 const API_KEY = process.env.GEMINI_API_KEY;
@@ -12,7 +13,39 @@ if (!API_KEY) {
     process.exit(1);
 }
 
-const NOMBRE_MODELO = "gemini-2.5-flash";
+const NOMBRE_MODELO = "gemini-2.5-flash-lite";
+
+// --- CONFIGURACIÓN DE GENERACIÓN (AJUSTES TÉCNICOS) ---
+const generationConfig = {
+    temperature: 1.0,       // Estándar (Creatividad balanceada)
+    topP: 0.95,            // Estándar
+    topK: 64,              // Estándar
+    maxOutputTokens: 3000, // Límite máximo de respuesta
+    responseMimeType: "text/plain",
+};
+
+// --- AJUSTES DE SEGURIDAD (BAJADOS AL MÍNIMO) ---
+const safetySettings = [
+    {
+        category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+    },
+    {
+        category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+    },
+    {
+        category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+    },
+    {
+        category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+    },
+    // Nota: 'Civic Integrity' no siempre se puede ajustar libremente en todos los modelos,
+    // pero las categorías principales arriba suelen ser suficientes para "bajar" la seguridad general.
+];
+
 
 // Definición del comportamiento y formato del bot
 const INSTRUCCIONES_BOT = `
