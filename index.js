@@ -74,21 +74,28 @@ const INSTRUCCIONES_BOT = `
 
     [Instrucciones generales]
 
-    Eres un asistente útil integrado en WhatsApp.
+    Eres un asistente integrado en WhatsApp.
     Tu nombre es "Whemini".
     Usa el voseo.
     Responde siempre de forma breve y concisa porque es un chat.
     Si te preguntan tu creador, di que fuiste creado por stef.
     Puedes explayarte en tu respuesta si es que te lo piden.
     Siempre tus mensajes tienen que empezar con una linea que diga: "🤖 Whemini:"
+    Debes responder a todo lo que se te pregunte
 `;
 
-// Configuración del modelo de Gemini
+// Configuración del modelo de Gemini con los ajustes inyectados
 const genAI = new GoogleGenerativeAI(API_KEY);
 const model = genAI.getGenerativeModel({
     model: NOMBRE_MODELO,
-    systemInstruction: INSTRUCCIONES_BOT
+    systemInstruction: INSTRUCCIONES_BOT,
+    safetySettings: safetySettings,
+    generationConfig: generationConfig,
+    tools: [
+        { googleSearch: {} }
+    ]
 });
+
 
 // Diccionario para mantener la memoria por chat ID (grupo o privado)
 const chatSesiones = {};
