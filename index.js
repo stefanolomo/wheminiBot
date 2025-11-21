@@ -5,8 +5,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 
-// --- MARCA DE TIEMPO DE INICIO (Para ignorar mensajes viejos) ---
-// Guardamos la hora actual en segundos (WhatsApp usa segundos Unix)
+// --- MARCA DE TIEMPO DE INICIO ---
 const TIMESTAMP_INICIO = Math.floor(Date.now() / 1000);
 
 // Validación de API Key
@@ -17,7 +16,8 @@ if (!API_KEY) {
 }
 
 // --- VARIABLES GLOBALES DE ESTADO ---
-let nombreModeloActual = "gemini-2.5-flash-lite"; // Modelo por defecto
+let nombreModeloActual = "gemini-2.5-flash-lite";
+let limiteTokensActual = 800; // <--- NUEVA VARIABLE: Valor inicial por defecto
 let totalTokensInput = 0;
 let totalTokensOutput = 0;
 let chatSesiones = {};
@@ -31,15 +31,6 @@ const MODELOS_DISPONIBLES = {
     '2.5-lite': 'gemini-2.5-flash-lite',
     '2.0-flash': 'gemini-2.0-flash',
     '2.0-lite': 'gemini-2.0-flash-lite'
-};
-
-// --- CONFIGURACIÓN TÉCNICA ---
-const generationConfig = {
-    temperature: 1.0,
-    topP: 0.95,
-    topK: 64,
-    maxOutputTokens: 800,
-    responseMimeType: "text/plain",
 };
 
 const safetySettings = [
@@ -80,21 +71,31 @@ const INSTRUCCIONES_BOT = `
 // --- INICIALIZACIÓN DE LA IA ---
 const genAI = new GoogleGenerativeAI(API_KEY);
 
-// Función para cargar/cambiar el modelo dinámicamente
+// Función para cargar/cambiar el modelo y configuración dinámicamente
 function cargarModelo(nombreTecnico) {
-    console.log(`🔄 Cargando modelo: ${nombreTecnico}...`);
+    console.log(`🔄 Cargando modelo: ${nombreTecnico} (Tokens: ${limiteTokensActual})...`);
+
+    // Definimos la configuración aquí dentro para que tome el valor actualizado de 'limiteTokensActual'
+    const dynamicGenerationConfig = {
+        temperature: 1.0,
+        topP: 0.95,
+        topK: 64,
+        maxOutputTokens: limiteTokensActual, // <--- Usamos la variable dinámica
+        responseMimeType: "text/plain",
+    };
+
     try {
         model = genAI.getGenerativeModel({
             model: nombreTecnico,
             systemInstruction: INSTRUCCIONES_BOT,
             safetySettings: safetySettings,
-            generationConfig: generationConfig,
+            generationConfig: dynamicGenerationConfig, // <--- Pasamos la config actualizada
             tools: [
-                { googleSearch: {} } // Grounding activado
+                { googleSearch: {} }
             ]
         });
         nombreModeloActual = nombreTecnico;
-        chatSesiones = {}; // Reiniciar memoria al cambiar modelo
+        chatSesiones = {}; // Reiniciar memoria al cambiar config
         return true;
     } catch (e) {
         console.error("Error cargando modelo:", e);
@@ -136,11 +137,7 @@ client.on('ready', () => console.log('✅ Whemini está listo y conectado.'));
 
 client.on('message_create', async (msg) => {
     try {
-        // --- FILTRO DE MENSAJES VIEJOS ---
-        // Si el mensaje se creó ANTES de que iniciara este script, lo ignoramos.
-        if (msg.timestamp < TIMESTAMP_INICIO) {
-            return;
-        }
+        if (msg.timestamp < TIMESTAMP_INICIO) return;
 
         const mensaje = msg.body.trim();
 
@@ -148,10 +145,30 @@ client.on('message_create', async (msg) => {
         if (mensaje === '!info') {
             const infoMsg = `📊 *Estado de Whemini*\n\n` +
                             `🧠 *Modelo:* \`${nombreModeloActual}\`\n` +
-                            `📥 *In:* ${totalTokensInput} tokens\n` +
-                            `📤 *Out:* ${totalTokensOutput} tokens\n` +
+                            `📏 *Límite Tokens:* ${limiteTokensActual}\n` + // <--- Muestra el límite actual
+                            `📥 *In:* ${totalTokensInput}\n` +
+                            `📤 *Out:* ${totalTokensOutput}\n` +
                             `📈 *Total:* ${totalTokensInput + totalTokensOutput}`;
             await msg.reply(infoMsg);
+            return;
+        }
+
+        // --- COMANDO: CAMBIAR LÍMITE DE TOKENS (NUEVO) ---
+        if (mensaje.startsWith('!tokens ')) {
+            const arg = mensaje.slice(8).trim();
+            const nuevoLimite = parseInt(arg);
+
+            if (!isNaN(nuevoLimite) && nuevoLimite > 0 && nuevoLimite <= 8192) {
+                limiteTokensActual = nuevoLimite;
+                // Recargamos el modelo para aplicar la nueva configuración
+                if (cargarModelo(nombreModeloActual)) {
+                    await msg.reply(`✅ *Límite actualizado.*\nNuevos tokens máximos: ${limiteTokensActual}.\n_(Memoria reiniciada)_`);
+                } else {
+                    await msg.reply("❌ Error interno al actualizar configuración.");
+                }
+            } else {
+                await msg.reply("❌ Número inválido. Ingresa un valor entre 1 y 8192.\nEjemplo: `!tokens 2000`");
+            }
             return;
         }
 
@@ -192,7 +209,7 @@ client.on('message_create', async (msg) => {
             const chat = await msg.getChat();
             const chatId = chat.id._serialized;
 
-            console.log(`📩 [${nombreModeloActual}] Comando en ${chat.name || chatId}: "${consulta}"`);
+            console.log(`📩 [${nombreModeloActual}|${limiteTokensActual}] Cmd en ${chat.name || chatId}: "${consulta}"`);
 
             chat.sendStateTyping();
 
@@ -200,7 +217,6 @@ client.on('message_create', async (msg) => {
             const result = await sesion.sendMessage(consulta);
             const response = await result.response;
 
-            // Contador de tokens
             if (response.usageMetadata) {
                 totalTokensInput += response.usageMetadata.promptTokenCount;
                 totalTokensOutput += response.usageMetadata.candidatesTokenCount;
@@ -219,11 +235,11 @@ client.on('message_create', async (msg) => {
     }
 });
 
-// --- ESPERA DE SEGURIDAD PARA INTERNET ---
+// --- ESPERA DE SEGURIDAD ---
 const SEGUNDOS_DE_ESPERA = 10;
-console.log(`⏳ Esperando ${SEGUNDOS_DE_ESPERA} segundos para asegurar conexión...`);
+console.log(`⏳ Esperando ${SEGUNDOS_DE_ESPERA} segundos...`);
 
 setTimeout(() => {
-    console.log("🚀 Iniciando conexión con WhatsApp...");
+    console.log("🚀 Iniciando...");
     client.initialize();
 }, SEGUNDOS_DE_ESPERA * 1000);
