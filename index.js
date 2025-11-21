@@ -103,11 +103,9 @@ const chatSesiones = {};
 // Obtiene o crea una sesión de chat con Gemini
 async function getSesion(chatId) {
     if (!chatSesiones[chatId]) {
+        // Al iniciar el chat, hereda la configuración del modelo (safety y generation)
         chatSesiones[chatId] = model.startChat({
             history: [],
-            generationConfig: {
-                maxOutputTokens: 800,
-            },
         });
     }
     return chatSesiones[chatId];
