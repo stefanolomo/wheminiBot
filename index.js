@@ -20,7 +20,7 @@ const generationConfig = {
     temperature: 1.0,       // Estándar (Creatividad balanceada)
     topP: 0.95,            // Estándar
     topK: 64,              // Estándar
-    maxOutputTokens: 3000, // Límite máximo de respuesta
+    maxOutputTokens: 1250, // Límite máximo de respuesta
     responseMimeType: "text/plain",
 };
 
