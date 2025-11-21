@@ -22,7 +22,7 @@ A diferencia de bots simples, Whemini tiene **memoria contextual**: recuerda lo 
 
 1. **Clonar el repositorio:**
    ```bash
-   git clone https://github.com/TU_USUARIO/whemini-bot.git
+   git clone https://github.com/stefanolomo/whemini-bot.git
    cd whemini-bot
    ```
 
