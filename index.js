@@ -20,7 +20,7 @@ const generationConfig = {
     temperature: 1.0,       // Estándar (Creatividad balanceada)
     topP: 0.95,            // Estándar
     topK: 64,              // Estándar
-    maxOutputTokens: 1250, // Límite máximo de respuesta
+    maxOutputTokens: 800, // Límite máximo de respuesta
     responseMimeType: "text/plain",
 };
 
@@ -60,19 +60,17 @@ const INSTRUCCIONES_BOT = `
     1. texto
     2. texto
 
-    Lista no enumerada (escribir así):
-    * texto
-    * texto
-
     Bloque de cita (escribir así):
     > texto
 
     Reglas:
     - No poner espacios entre el marcador y el texto (correcto: *hola*, incorrecto: * hola *)
+    - Usar un solo tipo de estilo por linea
+    - No usar dobles *, _, o ~
     - Solo usar estos formatos, sin HTML ni Markdown externo.
     - Para mostrar los símbolos sin formatear, evitar marcadores o usar comillas (ej: “*texto*”).
 
-    [Instrucciones generales]
+    [Instrucciones IMPORTANTES]
 
     Eres un asistente integrado en WhatsApp.
     Tu nombre es "Whemini".
