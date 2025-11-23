@@ -17,7 +17,7 @@ if (!API_KEY) {
 
 // --- VARIABLES GLOBALES DE ESTADO ---
 let nombreModeloActual = "gemini-2.5-flash-lite";
-let limiteTokensActual = 800; // <--- NUEVA VARIABLE: Valor inicial por defecto
+let limiteTokensActual = 800;
 let totalTokensInput = 0;
 let totalTokensOutput = 0;
 let chatSesiones = {};
@@ -46,23 +46,23 @@ const INSTRUCCIONES_BOT = `
     Itálica: _texto_
     Tachado: ~texto~
     Código (inline): \`texto\`
-
     Lista enumerada:
     1. texto
     2. texto
-
     Bloque de cita:
     > texto
 
     Reglas:
     - No poner espacios entre el marcador y el texto.
     - Usar un solo tipo de estilo por línea.
+    - No usar * para negrita y para bullet point en una sola linea. Si usas una no uses la otra. En ese caso usá "-"
     - Solo usar estos formatos, sin HTML ni Markdown externo.
 
     [Instrucciones IMPORTANTES]
     Eres un asistente integrado en WhatsApp llamado "Whemini".
     Usa el voseo.
     Responde de forma breve y concisa (es un chat).
+    Si recibes una imagen o documento, analízalo y responde según el contexto.
     Si te preguntan tu creador, di que fuiste creado por stef.
     Siempre tus mensajes tienen que empezar con una línea que diga: "🤖 Whemini:"
     Debes responder a todo lo que se te pregunte.
@@ -75,12 +75,11 @@ const genAI = new GoogleGenerativeAI(API_KEY);
 function cargarModelo(nombreTecnico) {
     console.log(`🔄 Cargando modelo: ${nombreTecnico} (Tokens: ${limiteTokensActual})...`);
 
-    // Definimos la configuración aquí dentro para que tome el valor actualizado de 'limiteTokensActual'
     const dynamicGenerationConfig = {
         temperature: 1.0,
         topP: 0.95,
         topK: 64,
-        maxOutputTokens: limiteTokensActual, // <--- Usamos la variable dinámica
+        maxOutputTokens: limiteTokensActual,
         responseMimeType: "text/plain",
     };
 
@@ -89,13 +88,13 @@ function cargarModelo(nombreTecnico) {
             model: nombreTecnico,
             systemInstruction: INSTRUCCIONES_BOT,
             safetySettings: safetySettings,
-            generationConfig: dynamicGenerationConfig, // <--- Pasamos la config actualizada
+            generationConfig: dynamicGenerationConfig,
             tools: [
                 { googleSearch: {} }
             ]
         });
         nombreModeloActual = nombreTecnico;
-        chatSesiones = {}; // Reiniciar memoria al cambiar config
+        chatSesiones = {};
         return true;
     } catch (e) {
         console.error("Error cargando modelo:", e);
@@ -114,6 +113,20 @@ async function getSesion(chatId) {
         });
     }
     return chatSesiones[chatId];
+}
+
+// --- FUNCIÓN HELPER PARA PROCESAR MEDIA (NUEVO) ---
+async function procesarMedia(msg) {
+    if (msg.hasMedia) {
+        return await msg.downloadMedia();
+    }
+    if (msg.hasQuotedMsg) {
+        const quotedMsg = await msg.getQuotedMessage();
+        if (quotedMsg.hasMedia) {
+            return await quotedMsg.downloadMedia();
+        }
+    }
+    return null;
 }
 
 // --- CLIENTE WHATSAPP ---
@@ -145,7 +158,7 @@ client.on('message_create', async (msg) => {
         if (mensaje === '!info') {
             const infoMsg = `📊 *Estado de Whemini*\n\n` +
                             `🧠 *Modelo:* \`${nombreModeloActual}\`\n` +
-                            `📏 *Límite Tokens:* ${limiteTokensActual}\n` + // <--- Muestra el límite actual
+                            `📏 *Límite Tokens:* ${limiteTokensActual}\n` +
                             `📥 *In:* ${totalTokensInput}\n` +
                             `📤 *Out:* ${totalTokensOutput}\n` +
                             `📈 *Total:* ${totalTokensInput + totalTokensOutput}`;
@@ -153,21 +166,20 @@ client.on('message_create', async (msg) => {
             return;
         }
 
-        // --- COMANDO: CAMBIAR LÍMITE DE TOKENS (NUEVO) ---
+        // --- COMANDO: CAMBIAR LÍMITE DE TOKENS ---
         if (mensaje.startsWith('!tokens ')) {
             const arg = mensaje.slice(8).trim();
             const nuevoLimite = parseInt(arg);
 
             if (!isNaN(nuevoLimite) && nuevoLimite > 0 && nuevoLimite <= 8192) {
                 limiteTokensActual = nuevoLimite;
-                // Recargamos el modelo para aplicar la nueva configuración
                 if (cargarModelo(nombreModeloActual)) {
                     await msg.reply(`✅ *Límite actualizado.*\nNuevos tokens máximos: ${limiteTokensActual}.\n_(Memoria reiniciada)_`);
                 } else {
                     await msg.reply("❌ Error interno al actualizar configuración.");
                 }
             } else {
-                await msg.reply("❌ Número inválido. Ingresa un valor entre 1 y 8192.\nEjemplo: `!tokens 2000`");
+                await msg.reply("❌ Número inválido. Ingresa un valor entre 1 y 8192.");
             }
             return;
         }
@@ -203,18 +215,46 @@ client.on('message_create', async (msg) => {
             return;
         }
 
-        // --- INTERACCIÓN CON EL BOT ---
-        if (mensaje.toLowerCase().startsWith('!bot ')) {
-            const consulta = mensaje.slice(5);
+        // --- INTERACCIÓN CON EL BOT (MULTIMODAL) ---
+        // Detecta si empieza con !bot O si hay media adjunta y caption con !bot
+        if (mensaje.toLowerCase().startsWith('!bot')) {
+            const consulta = mensaje.slice(4).trim(); // Removemos "!bot "
             const chat = await msg.getChat();
             const chatId = chat.id._serialized;
 
-            console.log(`📩 [${nombreModeloActual}|${limiteTokensActual}] Cmd en ${chat.name || chatId}: "${consulta}"`);
-
+            console.log(`📩 [${nombreModeloActual}] Cmd en ${chat.name || chatId}: "${consulta}"`);
             chat.sendStateTyping();
 
+            // 1. Verificar si hay imagen/pdf (directo o citado)
+            const mediaData = await procesarMedia(msg); // <--- NUEVA FUNCIÓN
+
+            // 2. Construir el payload para Gemini
+            let geminiPayload = [];
+
+            if (mediaData) {
+                console.log(`🖼️ Imagen/PDF detectado: ${mediaData.mimetype}`);
+                // Convertir formato wwebjs a formato Gemini
+                const imagePart = {
+                    inlineData: {
+                        data: mediaData.data, // Ya viene en base64
+                        mimeType: mediaData.mimetype
+                    }
+                };
+                geminiPayload.push(imagePart);
+            }
+
+            // Agregar el texto (si existe)
+            if (consulta) {
+                geminiPayload.push(consulta);
+            } else if (mediaData) {
+                // Si envía foto sin texto, ponemos un prompt por defecto
+                geminiPayload.push("Describe esto.");
+            }
+
+            // 3. Enviar a Gemini
             const sesion = await getSesion(chatId);
-            const result = await sesion.sendMessage(consulta);
+            // sendMessage acepta un array de partes (texto + imágenes)
+            const result = await sesion.sendMessage(geminiPayload);
             const response = await result.response;
 
             if (response.usageMetadata) {
