@@ -46,7 +46,7 @@ const INSTRUCCIONES_BOT = `
     Itálica: _texto_
     Tachado: ~texto~
     Código (inline): \`texto\`
-    Bloque de codigo: \```texto con saltos de linea\```
+    Bloque de codigo: triple backticks
     Lista enumerada:
     1. texto
     2. texto
