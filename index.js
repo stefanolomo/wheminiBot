@@ -91,8 +91,9 @@ function cargarModelo(nombreTecnico) {
             safetySettings: safetySettings,
             generationConfig: dynamicGenerationConfig,
             tools: [
-                { googleSearch: {} },
-                { codeExecution: {} }
+                { googleSearch: {} }
+                // ,
+                // { codeExecution: {} }
             ]
         });
         nombreModeloActual = nombreTecnico;
