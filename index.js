@@ -90,7 +90,8 @@ function cargarModelo(nombreTecnico) {
             safetySettings: safetySettings,
             generationConfig: dynamicGenerationConfig,
             tools: [
-                { googleSearch: {} }
+                { googleSearch: {} },
+                { codeExecution: {} }
             ]
         });
         nombreModeloActual = nombreTecnico;
@@ -226,7 +227,7 @@ client.on('message_create', async (msg) => {
             chat.sendStateTyping();
 
             // 1. Verificar si hay imagen/pdf (directo o citado)
-            const mediaData = await procesarMedia(msg); // <--- NUEVA FUNCIÓN
+            const mediaData = await procesarMedia(msg);
 
             // 2. Construir el payload para Gemini
             let geminiPayload = [];
