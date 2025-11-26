@@ -1,11 +1,13 @@
 // Carga variables de entorno desde el archivo .env
 require('dotenv').config();
 
-const fs = require('fs'); // <--- NUEVO: Para leer archivos
-const path = require('path'); // <--- NUEVO: Para manejar rutas
+const fs = require('fs');
+const path = require('path');
+const os = require('os'); // <--- Para obtener carpetas temporales
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
+const ffmpeg = require('fluent-ffmpeg'); // <--- NUEVA DEPENDENCIA
 
 // --- MARCA DE TIEMPO DE INICIO ---
 const TIMESTAMP_INICIO = Math.floor(Date.now() / 1000);
@@ -17,18 +19,16 @@ if (!API_KEY) {
     process.exit(1);
 }
 
-// --- CARGA DE INSTRUCCIONES DESDE ARCHIVO (NUEVO) ---
+// --- CARGA DE INSTRUCCIONES DESDE ARCHIVO ---
 const RUTA_INSTRUCCIONES = path.join(__dirname, 'instructions.txt');
 let INSTRUCCIONES_BOT = "";
 
 try {
-    // Leemos el archivo de forma síncrona para asegurar que esté listo antes de iniciar el bot
     INSTRUCCIONES_BOT = fs.readFileSync(RUTA_INSTRUCCIONES, 'utf8');
     console.log("✅ Instrucciones cargadas exitosamente desde instructions.txt");
 } catch (error) {
     console.error(`❌ ERROR CRÍTICO: No se pudo leer el archivo 'instructions.txt'.\nDetalle: ${error.message}`);
-    console.log("⚠️ Asegúrate de crear el archivo 'instructions.txt' en la misma carpeta que index.js");
-    process.exit(1); // Detenemos el bot si no hay instrucciones
+    process.exit(1);
 }
 
 // --- VARIABLES GLOBALES DE ESTADO ---
@@ -39,7 +39,6 @@ let totalTokensOutput = 0;
 let chatSesiones = {};
 let model = null;
 
-// --- MAPA DE MODELOS DISPONIBLES ---
 const MODELOS_DISPONIBLES = {
     '3-pro': 'gemini-3-pro-preview',
     '2.5-pro': 'gemini-2.5-pro',
@@ -56,10 +55,8 @@ const safetySettings = [
     { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
 ];
 
-// --- INICIALIZACIÓN DE LA IA ---
 const genAI = new GoogleGenerativeAI(API_KEY);
 
-// Función para cargar/cambiar el modelo y configuración dinámicamente
 function cargarModelo(nombreTecnico) {
     console.log(`🔄 Cargando modelo: ${nombreTecnico} (Tokens: ${limiteTokensActual})...`);
 
@@ -74,13 +71,11 @@ function cargarModelo(nombreTecnico) {
     try {
         model = genAI.getGenerativeModel({
             model: nombreTecnico,
-            systemInstruction: INSTRUCCIONES_BOT, // <--- Ahora usa la variable cargada del archivo
+            systemInstruction: INSTRUCCIONES_BOT,
             safetySettings: safetySettings,
             generationConfig: dynamicGenerationConfig,
             tools: [
                 { googleSearch: {} }
-                // ,
-                // { codeExecution: {} }
             ]
         });
         nombreModeloActual = nombreTecnico;
@@ -92,10 +87,8 @@ function cargarModelo(nombreTecnico) {
     }
 }
 
-// Cargar modelo inicial
 cargarModelo(nombreModeloActual);
 
-// --- GESTIÓN DE SESIONES ---
 async function getSesion(chatId) {
     if (!chatSesiones[chatId]) {
         chatSesiones[chatId] = model.startChat({
@@ -105,21 +98,82 @@ async function getSesion(chatId) {
     return chatSesiones[chatId];
 }
 
-// --- FUNCIÓN HELPER PARA PROCESAR MEDIA ---
-async function procesarMedia(msg) {
-    if (msg.hasMedia) {
-        return await msg.downloadMedia();
-    }
-    if (msg.hasQuotedMsg) {
-        const quotedMsg = await msg.getQuotedMessage();
-        if (quotedMsg.hasMedia) {
-            return await quotedMsg.downloadMedia();
-        }
-    }
-    return null;
+// --- FUNCIÓN PARA CONVERTIR AUDIO (NUEVO) ---
+function convertirAudioAMp3(mediaData) {
+    return new Promise((resolve, reject) => {
+        const tempDir = os.tmpdir();
+        const timestamp = Date.now();
+        const inputPath = path.join(tempDir, `input_${timestamp}.ogg`);
+        const outputPath = path.join(tempDir, `output_${timestamp}.mp3`);
+
+        // Decodificar base64 y guardar archivo temporalmente
+        const buffer = Buffer.from(mediaData.data, 'base64');
+        fs.writeFileSync(inputPath, buffer);
+
+        console.log("🎵 Convirtiendo audio a MP3...");
+
+        ffmpeg(inputPath)
+            .toFormat('mp3')
+            .on('error', (err) => {
+                console.error('❌ Error en FFmpeg:', err);
+                // Limpieza en caso de error
+                try { if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath); } catch(e){}
+                reject(err);
+            })
+            .on('end', () => {
+                // Leer el archivo convertido
+                try {
+                    const mp3Buffer = fs.readFileSync(outputPath);
+                    const mp3Base64 = mp3Buffer.toString('base64');
+
+                    // Limpieza de archivos temporales
+                    fs.unlinkSync(inputPath);
+                    fs.unlinkSync(outputPath);
+
+                    console.log("✅ Audio convertido exitosamente.");
+
+                    // Retornar el objeto media actualizado
+                    resolve({
+                        mimetype: 'audio/mp3',
+                        data: mp3Base64,
+                        filename: 'audio.mp3'
+                    });
+                } catch (err) {
+                    reject(err);
+                }
+            })
+            .save(outputPath);
+    });
 }
 
-// --- CLIENTE WHATSAPP ---
+// --- FUNCIÓN HELPER PARA PROCESAR MEDIA (MODIFICADA) ---
+async function procesarMedia(msg) {
+    let media = null;
+
+    if (msg.hasMedia) {
+        media = await msg.downloadMedia();
+    } else if (msg.hasQuotedMsg) {
+        const quotedMsg = await msg.getQuotedMessage();
+        if (quotedMsg.hasMedia) {
+            media = await quotedMsg.downloadMedia();
+        }
+    }
+
+    if (media) {
+        // Si es audio (normalmente audio/ogg; codecs=opus en whatsapp), lo convertimos
+        if (media.mimetype.startsWith('audio') || media.mimetype.includes('ogg')) {
+            try {
+                return await convertirAudioAMp3(media);
+            } catch (error) {
+                console.error("⚠️ Falló la conversión de audio, enviando original:", error.message);
+                return media; // Fallback: enviar original si falla
+            }
+        }
+    }
+
+    return media;
+}
+
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -144,7 +198,7 @@ client.on('message_create', async (msg) => {
 
         const mensaje = msg.body.trim();
 
-        // --- COMANDO: INFO Y CONSUMO ---
+        // --- COMANDO: INFO ---
         if (mensaje === '!info') {
             const infoMsg = `📊 *Estado de Whemini*\n\n` +
                             `🧠 *Modelo:* \`${nombreModeloActual}\`\n` +
@@ -156,34 +210,28 @@ client.on('message_create', async (msg) => {
             return;
         }
 
-        // --- COMANDO: CAMBIAR LÍMITE DE TOKENS ---
+        // --- COMANDO: TOKENS ---
         if (mensaje.startsWith('!tokens ')) {
             const arg = mensaje.slice(8).trim();
             const nuevoLimite = parseInt(arg);
-
             if (!isNaN(nuevoLimite) && nuevoLimite > 0 && nuevoLimite <= 8192) {
                 limiteTokensActual = nuevoLimite;
                 if (cargarModelo(nombreModeloActual)) {
-                    await msg.reply(`✅ *Límite actualizado.*\nNuevos tokens máximos: ${limiteTokensActual}.\n_(Memoria reiniciada)_`);
-                } else {
-                    await msg.reply("❌ Error interno al actualizar configuración.");
+                    await msg.reply(`✅ *Límite actualizado.*\nNuevos tokens máximos: ${limiteTokensActual}.`);
                 }
             } else {
-                await msg.reply("❌ Número inválido. Ingresa un valor entre 1 y 8192.");
+                await msg.reply("❌ Número inválido.");
             }
             return;
         }
 
-        // --- COMANDO: CAMBIAR MODELO ---
+        // --- COMANDO: MODELO ---
         if (mensaje.startsWith('!modelo ')) {
             const alias = mensaje.slice(8).trim().toLowerCase();
             const nombreTecnico = MODELOS_DISPONIBLES[alias];
-
             if (nombreTecnico) {
                 if (cargarModelo(nombreTecnico)) {
-                    await msg.reply(`✅ Cambio exitoso a: \`${nombreTecnico}\`\n_(Memoria reiniciada)_`);
-                } else {
-                    await msg.reply("❌ Error interno al cambiar de modelo.");
+                    await msg.reply(`✅ Cambio exitoso a: \`${nombreTecnico}\`.`);
                 }
             } else {
                 const lista = Object.keys(MODELOS_DISPONIBLES).map(k => `• ${k}`).join('\n');
@@ -192,57 +240,62 @@ client.on('message_create', async (msg) => {
             return;
         }
 
-        // --- COMANDO: RESET MEMORIA ---
+        // --- COMANDO: RESET ---
         if (mensaje === '!reset') {
             const chat = await msg.getChat();
             const chatId = chat.id._serialized;
-            if (chatSesiones[chatId]) {
-                delete chatSesiones[chatId];
-                await msg.reply("🤖 Whemini: *Memoria reiniciada.*");
-            } else {
-                await msg.reply("🤖 Whemini: No había nada que olvidar.");
-            }
+            if (chatSesiones[chatId]) delete chatSesiones[chatId];
+            await msg.reply("🤖 Whemini: *Memoria reiniciada.*");
             return;
         }
 
-        // --- INTERACCIÓN CON EL BOT (MULTIMODAL) ---
-        if (mensaje.toLowerCase().startsWith('!bot')) {
-            const consulta = mensaje.slice(4).trim(); // Removemos "!bot "
+        // --- INTERACCIÓN CON EL BOT ---
+        // Detectar si es un comando !bot o si es un mensaje de audio directo (sin texto)
+        // Nota: Para audios, whatsapp a veces no trae "body" visible fácilmente si es nota de voz.
+        const esComandoBot = mensaje.toLowerCase().startsWith('!bot');
+
+        // Si es comando explícito O si hay multimedia (asumimos que quiere procesarlo si nos etiqueta o responde,
+        // pero aquí mantenemos la lógica de !bot para no ser invasivos).
+        if (esComandoBot) {
+            const consulta = mensaje.slice(4).trim();
             const chat = await msg.getChat();
             const chatId = chat.id._serialized;
 
-            console.log(`📩 [${nombreModeloActual}] Cmd en ${chat.name || chatId}: "${consulta}"`);
+            console.log(`📩 [${nombreModeloActual}] Cmd en ${chat.name || chatId}`);
             chat.sendStateTyping();
 
-            // 1. Verificar si hay imagen/pdf
+            // 1. Procesar Media (Convierte Audio si es necesario)
             const mediaData = await procesarMedia(msg);
 
-            // 2. Construir el payload para Gemini
+            // 2. Construir Payload
             let geminiPayload = [];
 
             if (mediaData) {
-                console.log(`🖼️ Imagen/PDF detectado: ${mediaData.mimetype}`);
-                // Convertir formato wwebjs a formato Gemini
-                const imagePart = {
+                console.log(`📎 Media adjunto: ${mediaData.mimetype}`);
+                const filePart = {
                     inlineData: {
-                        data: mediaData.data, // Ya viene en base64
+                        data: mediaData.data,
                         mimeType: mediaData.mimetype
                     }
                 };
-                geminiPayload.push(imagePart);
+                geminiPayload.push(filePart);
             }
 
-            // Agregar el texto
+            // 3. Definir el prompt de texto
             if (consulta) {
                 geminiPayload.push(consulta);
             } else if (mediaData) {
-                // Si envía foto sin texto, ponemos un prompt por defecto
-                geminiPayload.push("Describe esto.");
+                if (mediaData.mimetype.startsWith('audio')) {
+                    geminiPayload.push("Escucha este audio atentamente, transcribe lo que dice y responde o resume su contenido.");
+                } else if (mediaData.mimetype.startsWith('image')) {
+                    geminiPayload.push("Describe esta imagen.");
+                } else {
+                    geminiPayload.push("Analiza este archivo.");
+                }
             }
 
-            // 3. Enviar a Gemini
+            // 4. Enviar a Gemini
             const sesion = await getSesion(chatId);
-            // sendMessage acepta un array de partes (texto + imágenes)
             const result = await sesion.sendMessage(geminiPayload);
             const response = await result.response;
 
@@ -264,10 +317,8 @@ client.on('message_create', async (msg) => {
     }
 });
 
-// --- ESPERA DE SEGURIDAD ---
 const SEGUNDOS_DE_ESPERA = 10;
 console.log(`⏳ Esperando ${SEGUNDOS_DE_ESPERA} segundos...`);
-
 setTimeout(() => {
     console.log("🚀 Iniciando...");
     client.initialize();
