@@ -3,11 +3,11 @@ require('dotenv').config();
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os'); // <--- Para obtener carpetas temporales
+const os = require('os');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
-const ffmpeg = require('fluent-ffmpeg'); // <--- NUEVA DEPENDENCIA
+const ffmpeg = require('fluent-ffmpeg');
 
 // --- MARCA DE TIEMPO DE INICIO ---
 const TIMESTAMP_INICIO = Math.floor(Date.now() / 1000);
@@ -39,6 +39,7 @@ let totalTokensOutput = 0;
 let chatSesiones = {};
 let model = null;
 
+// --- MAPA DE MODELOS DISPONIBLES ---
 const MODELOS_DISPONIBLES = {
     '3-pro': 'gemini-3-pro-preview',
     '2.5-pro': 'gemini-2.5-pro',
@@ -55,6 +56,7 @@ const safetySettings = [
     { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
 ];
 
+// --- INICIALIZACIÓN DE LA IA ---
 const genAI = new GoogleGenerativeAI(API_KEY);
 
 function cargarModelo(nombreTecnico) {
@@ -98,7 +100,7 @@ async function getSesion(chatId) {
     return chatSesiones[chatId];
 }
 
-// --- FUNCIÓN PARA CONVERTIR AUDIO (NUEVO) ---
+// --- FUNCIÓN PARA CONVERTIR AUDIO ---
 function convertirAudioAMp3(mediaData) {
     return new Promise((resolve, reject) => {
         const tempDir = os.tmpdir();
@@ -116,23 +118,20 @@ function convertirAudioAMp3(mediaData) {
             .toFormat('mp3')
             .on('error', (err) => {
                 console.error('❌ Error en FFmpeg:', err);
-                // Limpieza en caso de error
                 try { if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath); } catch(e){}
                 reject(err);
             })
             .on('end', () => {
-                // Leer el archivo convertido
                 try {
                     const mp3Buffer = fs.readFileSync(outputPath);
                     const mp3Base64 = mp3Buffer.toString('base64');
 
-                    // Limpieza de archivos temporales
+                    // Limpieza
                     fs.unlinkSync(inputPath);
                     fs.unlinkSync(outputPath);
 
                     console.log("✅ Audio convertido exitosamente.");
 
-                    // Retornar el objeto media actualizado
                     resolve({
                         mimetype: 'audio/mp3',
                         data: mp3Base64,
@@ -146,7 +145,7 @@ function convertirAudioAMp3(mediaData) {
     });
 }
 
-// --- FUNCIÓN HELPER PARA PROCESAR MEDIA (MODIFICADA) ---
+// --- FUNCIÓN HELPER PARA PROCESAR MEDIA ---
 async function procesarMedia(msg) {
     let media = null;
 
@@ -160,13 +159,13 @@ async function procesarMedia(msg) {
     }
 
     if (media) {
-        // Si es audio (normalmente audio/ogg; codecs=opus en whatsapp), lo convertimos
+        // Detectar audios (Whatsapp suele usar audio/ogg; codecs=opus)
         if (media.mimetype.startsWith('audio') || media.mimetype.includes('ogg')) {
             try {
                 return await convertirAudioAMp3(media);
             } catch (error) {
                 console.error("⚠️ Falló la conversión de audio, enviando original:", error.message);
-                return media; // Fallback: enviar original si falla
+                return media;
             }
         }
     }
@@ -174,6 +173,7 @@ async function procesarMedia(msg) {
     return media;
 }
 
+// --- CLIENTE WHATSAPP ---
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -250,21 +250,23 @@ client.on('message_create', async (msg) => {
         }
 
         // --- INTERACCIÓN CON EL BOT ---
-        // Detectar si es un comando !bot o si es un mensaje de audio directo (sin texto)
-        // Nota: Para audios, whatsapp a veces no trae "body" visible fácilmente si es nota de voz.
         const esComandoBot = mensaje.toLowerCase().startsWith('!bot');
 
-        // Si es comando explícito O si hay multimedia (asumimos que quiere procesarlo si nos etiqueta o responde,
-        // pero aquí mantenemos la lógica de !bot para no ser invasivos).
         if (esComandoBot) {
             const consulta = mensaje.slice(4).trim();
             const chat = await msg.getChat();
             const chatId = chat.id._serialized;
 
-            console.log(`📩 [${nombreModeloActual}] Cmd en ${chat.name || chatId}`);
+            // LOGUEO DETALLADO DE LA CONSULTA EN CONSOLA
+            let logTexto = consulta;
+            if (!logTexto && (msg.hasMedia || msg.hasQuotedMsg)) {
+                logTexto = "[Archivo Adjunto/Citado]";
+            }
+            console.log(`📩 [${nombreModeloActual}] Cmd en ${chat.name || chatId}: "${logTexto}"`);
+
             chat.sendStateTyping();
 
-            // 1. Procesar Media (Convierte Audio si es necesario)
+            // 1. Procesar Media
             const mediaData = await procesarMedia(msg);
 
             // 2. Construir Payload
@@ -285,6 +287,7 @@ client.on('message_create', async (msg) => {
             if (consulta) {
                 geminiPayload.push(consulta);
             } else if (mediaData) {
+                // Prompt por defecto si no hay texto pero sí multimedia
                 if (mediaData.mimetype.startsWith('audio')) {
                     geminiPayload.push("Escucha este audio atentamente, transcribe lo que dice y responde o resume su contenido.");
                 } else if (mediaData.mimetype.startsWith('image')) {
@@ -317,8 +320,10 @@ client.on('message_create', async (msg) => {
     }
 });
 
-const SEGUNDOS_DE_ESPERA = 10;
+// --- ESPERA DE SEGURIDAD ---
+const SEGUNDOS_DE_ESPERA = 5;
 console.log(`⏳ Esperando ${SEGUNDOS_DE_ESPERA} segundos...`);
+
 setTimeout(() => {
     console.log("🚀 Iniciando...");
     client.initialize();
