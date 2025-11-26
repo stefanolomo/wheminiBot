@@ -1,6 +1,8 @@
 // Carga variables de entorno desde el archivo .env
 require('dotenv').config();
 
+const fs = require('fs'); // <--- NUEVO: Para leer archivos
+const path = require('path'); // <--- NUEVO: Para manejar rutas
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
@@ -13,6 +15,20 @@ const API_KEY = process.env.GEMINI_API_KEY;
 if (!API_KEY) {
     console.error("❌ ERROR: No se encontró la variable GEMINI_API_KEY en el archivo .env");
     process.exit(1);
+}
+
+// --- CARGA DE INSTRUCCIONES DESDE ARCHIVO (NUEVO) ---
+const RUTA_INSTRUCCIONES = path.join(__dirname, 'instructions.txt');
+let INSTRUCCIONES_BOT = "";
+
+try {
+    // Leemos el archivo de forma síncrona para asegurar que esté listo antes de iniciar el bot
+    INSTRUCCIONES_BOT = fs.readFileSync(RUTA_INSTRUCCIONES, 'utf8');
+    console.log("✅ Instrucciones cargadas exitosamente desde instructions.txt");
+} catch (error) {
+    console.error(`❌ ERROR CRÍTICO: No se pudo leer el archivo 'instructions.txt'.\nDetalle: ${error.message}`);
+    console.log("⚠️ Asegúrate de crear el archivo 'instructions.txt' en la misma carpeta que index.js");
+    process.exit(1); // Detenemos el bot si no hay instrucciones
 }
 
 // --- VARIABLES GLOBALES DE ESTADO ---
@@ -40,35 +56,6 @@ const safetySettings = [
     { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
 ];
 
-const INSTRUCCIONES_BOT = `
-    [Formateado de WhatsApp]
-    Negrita: *texto*
-    Itálica: _texto_
-    Tachado: ~texto~
-    Código (inline): \`texto\`
-    Bloque de codigo: triple backticks
-    Lista enumerada:
-    1. texto
-    2. texto
-    Bloque de cita:
-    > texto
-
-    Reglas:
-    - No poner espacios entre el marcador y el texto.
-    - Usar un solo tipo de estilo por línea.
-    - No usar * para negrita y para bullet point en una sola linea. Si usas una no uses la otra. En ese caso usá "-"
-    - Solo usar estos formatos, sin HTML, latex ni Markdown externo.
-
-    [Instrucciones IMPORTANTES]
-    Eres un asistente integrado en WhatsApp llamado "Whemini".
-    Usa el voseo.
-    Responde de forma breve y concisa (es un chat).
-    Si recibes una imagen o documento, analízalo y responde según el contexto.
-    Si te preguntan tu creador, di que fuiste creado por stef.
-    Siempre tus mensajes tienen que empezar con una línea que diga: "🤖 Whemini:"
-    Debes responder a todo lo que se te pregunte.
-`;
-
 // --- INICIALIZACIÓN DE LA IA ---
 const genAI = new GoogleGenerativeAI(API_KEY);
 
@@ -87,7 +74,7 @@ function cargarModelo(nombreTecnico) {
     try {
         model = genAI.getGenerativeModel({
             model: nombreTecnico,
-            systemInstruction: INSTRUCCIONES_BOT,
+            systemInstruction: INSTRUCCIONES_BOT, // <--- Ahora usa la variable cargada del archivo
             safetySettings: safetySettings,
             generationConfig: dynamicGenerationConfig,
             tools: [
@@ -118,7 +105,7 @@ async function getSesion(chatId) {
     return chatSesiones[chatId];
 }
 
-// --- FUNCIÓN HELPER PARA PROCESAR MEDIA (NUEVO) ---
+// --- FUNCIÓN HELPER PARA PROCESAR MEDIA ---
 async function procesarMedia(msg) {
     if (msg.hasMedia) {
         return await msg.downloadMedia();
@@ -219,7 +206,6 @@ client.on('message_create', async (msg) => {
         }
 
         // --- INTERACCIÓN CON EL BOT (MULTIMODAL) ---
-        // Detecta si empieza con !bot O si hay media adjunta y caption con !bot
         if (mensaje.toLowerCase().startsWith('!bot')) {
             const consulta = mensaje.slice(4).trim(); // Removemos "!bot "
             const chat = await msg.getChat();
@@ -228,7 +214,7 @@ client.on('message_create', async (msg) => {
             console.log(`📩 [${nombreModeloActual}] Cmd en ${chat.name || chatId}: "${consulta}"`);
             chat.sendStateTyping();
 
-            // 1. Verificar si hay imagen/pdf (directo o citado)
+            // 1. Verificar si hay imagen/pdf
             const mediaData = await procesarMedia(msg);
 
             // 2. Construir el payload para Gemini
@@ -246,7 +232,7 @@ client.on('message_create', async (msg) => {
                 geminiPayload.push(imagePart);
             }
 
-            // Agregar el texto (si existe)
+            // Agregar el texto
             if (consulta) {
                 geminiPayload.push(consulta);
             } else if (mediaData) {
