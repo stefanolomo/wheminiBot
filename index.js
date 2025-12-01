@@ -32,7 +32,7 @@ try {
 }
 
 // --- VARIABLES GLOBALES DE ESTADO ---
-let nombreModeloActual = "gemini-2.0-lite";
+let nombreModeloActual = "gemini-2.0-flash-lite";
 let limiteTokensActual = 650;
 let totalTokensInput = 0;
 let totalTokensOutput = 0;
