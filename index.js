@@ -33,7 +33,7 @@ try {
 
 // --- VARIABLES GLOBALES DE ESTADO ---
 let nombreModeloActual = "gemini-2.5-flash-lite";
-let limiteTokensActual = 800;
+let limiteTokensActual = 600;
 let totalTokensInput = 0;
 let totalTokensOutput = 0;
 let chatSesiones = {};
@@ -257,19 +257,33 @@ client.on('message_create', async (msg) => {
             const chat = await msg.getChat();
             const chatId = chat.id._serialized;
 
-            // LOGUEO DETALLADO DE LA CONSULTA EN CONSOLA
+            // --- IDENTIFICACIÓN DEL USUARIO ---
+            // Usamos msg.from (si es chat privado) o msg.author (si es grupo)
+            // msg.author es undefined en chats privados, por eso el fallback || msg.from
+            const rawSenderId = msg.author || msg.from;
+
+            // Limpiamos el ID para obtener solo el número (ej: 54911...)
+            const numeroUsuario = rawSenderId ? rawSenderId.replace(/\D/g, '') : "Desconocido";
+
+            // Nombre público (pushname)
+            const nombreUsuario = msg._data.notifyName || "Usuario";
+
+            // LOGUEO DETALLADO
             let logTexto = consulta;
             if (!logTexto && (msg.hasMedia || msg.hasQuotedMsg)) {
                 logTexto = "[Archivo Adjunto/Citado]";
             }
-            console.log(`📩 [${nombreModeloActual}] Cmd en ${chat.name || chatId}: "${logTexto}"`);
+            console.log(`📩 [${nombreModeloActual}] De: ${numeroUsuario} (${nombreUsuario}) en ${chat.name || chatId}: "${logTexto}"`);
 
             chat.sendStateTyping();
 
             // 1. Procesar Media
             const mediaData = await procesarMedia(msg);
 
-            // 2. Construir Payload
+            // 2. Construir Contexto de Identidad
+            const contextoUsuario = `[Sistema: El mensaje proviene del número +${numeroUsuario}, el usuario se llama "${nombreUsuario}". Úsalo si es relevante para responder].\n\n`;
+
+            // 3. Construir Payload para Gemini
             let geminiPayload = [];
 
             if (mediaData) {
@@ -283,18 +297,20 @@ client.on('message_create', async (msg) => {
                 geminiPayload.push(filePart);
             }
 
-            // 3. Definir el prompt de texto
             if (consulta) {
-                geminiPayload.push(consulta);
+                // Inyectamos el contexto antes del texto del usuario
+                geminiPayload.push(contextoUsuario + consulta);
             } else if (mediaData) {
-                // Prompt por defecto si no hay texto pero sí multimedia
+                // Prompt por defecto si solo hay media, con contexto incluido
+                let promptMedia = contextoUsuario;
                 if (mediaData.mimetype.startsWith('audio')) {
-                    geminiPayload.push("Escucha este audio atentamente, transcribe lo que dice y responde o resume su contenido.");
+                    promptMedia += "Escucha este audio atentamente, pone en texto todo lo que dice y responde o resume su contenido.";
                 } else if (mediaData.mimetype.startsWith('image')) {
-                    geminiPayload.push("Describe esta imagen.");
+                    promptMedia += "Describe esta imagen.";
                 } else {
-                    geminiPayload.push("Analiza este archivo.");
+                    promptMedia += "Analiza este archivo.";
                 }
+                geminiPayload.push(promptMedia);
             }
 
             // 4. Enviar a Gemini
@@ -308,7 +324,26 @@ client.on('message_create', async (msg) => {
             }
 
             const text = response.text();
-            await msg.reply(text);
+
+            // --- LÓGICA DE MENCIONES (TAGGING) ---
+            // Basado en Client.js: pasamos un array de IDs serializados en las options.
+            const mentions = [];
+
+            // Regex busca patrones @numero (ej: @54911223344)
+            const patronMencion = /@(\d+)/g;
+            let match;
+
+            while ((match = patronMencion.exec(text)) !== null) {
+                const numeroEncontrado = match[1];
+                // Construimos el ID serializado standard de WhatsApp (@c.us)
+                // Esto permite taggear gente NO agendada.
+                const serializedId = `${numeroEncontrado}@c.us`;
+                mentions.push(serializedId);
+            }
+
+            // 5. Responder a WhatsApp con las menciones procesadas
+            await msg.reply(text, undefined, { mentions: mentions });
+
             chat.clearState();
         }
 
