@@ -173,6 +173,76 @@ async function procesarMedia(msg) {
     return media;
 }
 
+// --- HELPER PARA RESOLVER NÚMEROS ---
+async function obtenerNumeroReal(msg, client) {
+    // 1. CASO PROPIO: Si el mensaje es mío (del bot), usar info del cliente
+    if (msg.fromMe) {
+        if (client.info && client.info.wid) {
+            return client.info.wid.user;
+        }
+    }
+
+    // 2. OBTENER ID CANDIDATO
+    let idCandidato = msg.author || msg.from;
+
+    // Si ya es un teléfono (@c.us), lo usamos directo
+    if (idCandidato && idCandidato.includes('@c.us')) {
+        return idCandidato.replace(/\D/g, '');
+    }
+
+    // 3. BUSCAR EN METADATA OCULTA (_data)
+    // A veces id.participant tiene el número real aunque author tenga el LID
+    if (msg._data) {
+        if (msg._data.id && msg._data.id.participant && msg._data.id.participant.includes('@c.us')) {
+            return msg._data.id.participant.replace(/\D/g, '');
+        }
+        // Fallback extra para algunos casos de grupo
+        if (msg._data.participant && msg._data.participant.includes('@c.us')) {
+            return msg._data.participant.replace(/\D/g, '');
+        }
+    }
+
+    // 4. INYECCIÓN BROWSER
+    // Buscamos en el Store de Contactos de WhatsApp Web
+    try {
+        const telefonoMapeado = await client.pupPage.evaluate((targetId) => {
+            try {
+                // Aseguramos formato LID si es solo números
+                if (!targetId.includes('@')) targetId = targetId + '@lid';
+
+                const wid = window.Store.WidFactory.createWid(targetId);
+
+                // Estrategia A: LidUtils (Para mapeo LID -> Phone)
+                if (window.Store.LidUtils && window.Store.LidUtils.getPhoneNumber) {
+                    const pn = window.Store.LidUtils.getPhoneNumber(wid);
+                    if (pn && pn.user) return pn.user; // Devolvemos SOLO el número string
+                }
+
+                // Estrategia B: Buscar en Contact Store
+                const contact = window.Store.Contact.get(wid);
+                if (contact) {
+                    if (contact.userid) return contact.userid; // Mejor propiedad para user real
+                    if (contact.phoneNumber) return contact.phoneNumber;
+                    if (contact.id && contact.id.user && contact.id.server === 'c.us') {
+                        return contact.id.user;
+                    }
+                }
+                return null;
+            } catch(e) { return null; }
+        }, idCandidato);
+
+        // Verificamos que sea TEXTO antes de usar replace (Aquí fallaba antes)
+        if (telefonoMapeado && typeof telefonoMapeado === 'string') {
+            return telefonoMapeado.replace(/\D/g, '');
+        }
+    } catch (e) {
+        console.error("⚠️ Falló resolución profunda de LID:", e.message);
+    }
+
+    // 5. FALLBACK FINAL: Devolvemos lo que haya
+    return idCandidato ? idCandidato.replace(/\D/g, '') : "Desconocido";
+}
+
 // --- CLIENTE WHATSAPP ---
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -258,14 +328,7 @@ client.on('message_create', async (msg) => {
             const chatId = chat.id._serialized;
 
             // --- IDENTIFICACIÓN DEL USUARIO ---
-            // Usamos msg.from (si es chat privado) o msg.author (si es grupo)
-            // msg.author es undefined en chats privados, por eso el fallback || msg.from
-            const rawSenderId = msg.author || msg.from;
-
-            // Limpiamos el ID para obtener solo el número (ej: 54911...)
-            const numeroUsuario = rawSenderId ? rawSenderId.replace(/\D/g, '') : "Desconocido";
-
-            // Nombre público (pushname)
+            const numeroUsuario = await obtenerNumeroReal(msg, client);
             const nombreUsuario = msg._data.notifyName || "Usuario";
 
             // LOGUEO DETALLADO
