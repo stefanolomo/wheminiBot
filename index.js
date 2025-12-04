@@ -1,4 +1,5 @@
-// Carga variables de entorno desde el archivo .env
+// --- START OF FILE index.js ---
+
 require('dotenv').config();
 
 const fs = require('fs');
@@ -19,19 +20,19 @@ if (!API_KEY) {
     process.exit(1);
 }
 
-// --- CARGA DE INSTRUCCIONES DESDE ARCHIVO ---
+// --- CARGA DE INSTRUCCIONES ---
 const RUTA_INSTRUCCIONES = path.join(__dirname, 'instructions.txt');
 let INSTRUCCIONES_BOT = "";
 
 try {
     INSTRUCCIONES_BOT = fs.readFileSync(RUTA_INSTRUCCIONES, 'utf8');
-    console.log("✅ Instrucciones cargadas exitosamente desde instructions.txt");
+    console.log("✅ Instrucciones cargadas.");
 } catch (error) {
-    console.error(`❌ ERROR CRÍTICO: No se pudo leer el archivo 'instructions.txt'.\nDetalle: ${error.message}`);
+    console.error(`❌ ERROR CRÍTICO: No se pudo leer 'instructions.txt'. ${error.message}`);
     process.exit(1);
 }
 
-// --- VARIABLES GLOBALES DE ESTADO ---
+// --- VARIABLES DE ESTADO ---
 let nombreModeloActual = "gemini-2.0-flash-lite";
 let limiteTokensActual = 650;
 let totalTokensInput = 0;
@@ -39,7 +40,7 @@ let totalTokensOutput = 0;
 let chatSesiones = {};
 let model = null;
 
-// --- MAPA DE MODELOS DISPONIBLES ---
+// --- MODELOS ---
 const MODELOS_DISPONIBLES = {
     '3-pro': 'gemini-3-pro-preview',
     '2.5-pro': 'gemini-2.5-pro',
@@ -56,12 +57,11 @@ const safetySettings = [
     { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
 ];
 
-// --- INICIALIZACIÓN DE LA IA ---
+// --- INICIALIZACIÓN GEMINI ---
 const genAI = new GoogleGenerativeAI(API_KEY);
 
 function cargarModelo(nombreTecnico) {
-    console.log(`🔄 Cargando modelo: ${nombreTecnico} (Tokens: ${limiteTokensActual})...`);
-
+    console.log(`🔄 Modelo activo: ${nombreTecnico}`);
     const dynamicGenerationConfig = {
         temperature: 1.0,
         topP: 0.95,
@@ -76,9 +76,7 @@ function cargarModelo(nombreTecnico) {
             systemInstruction: INSTRUCCIONES_BOT,
             safetySettings: safetySettings,
             generationConfig: dynamicGenerationConfig,
-            tools: [
-                { googleSearch: {} }
-            ]
+            tools: [{ googleSearch: {} }]
         });
         nombreModeloActual = nombreTecnico;
         chatSesiones = {};
@@ -93,14 +91,12 @@ cargarModelo(nombreModeloActual);
 
 async function getSesion(chatId) {
     if (!chatSesiones[chatId]) {
-        chatSesiones[chatId] = model.startChat({
-            history: [],
-        });
+        chatSesiones[chatId] = model.startChat({ history: [] });
     }
     return chatSesiones[chatId];
 }
 
-// --- FUNCIÓN PARA CONVERTIR AUDIO ---
+// --- UTIL: CONVERTIR AUDIO ---
 function convertirAudioAMp3(mediaData) {
     return new Promise((resolve, reject) => {
         const tempDir = os.tmpdir();
@@ -108,16 +104,12 @@ function convertirAudioAMp3(mediaData) {
         const inputPath = path.join(tempDir, `input_${timestamp}.ogg`);
         const outputPath = path.join(tempDir, `output_${timestamp}.mp3`);
 
-        // Decodificar base64 y guardar archivo temporalmente
         const buffer = Buffer.from(mediaData.data, 'base64');
         fs.writeFileSync(inputPath, buffer);
-
-        console.log("🎵 Convirtiendo audio a MP3...");
 
         ffmpeg(inputPath)
             .toFormat('mp3')
             .on('error', (err) => {
-                console.error('❌ Error en FFmpeg:', err);
                 try { if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath); } catch(e){}
                 reject(err);
             })
@@ -125,121 +117,86 @@ function convertirAudioAMp3(mediaData) {
                 try {
                     const mp3Buffer = fs.readFileSync(outputPath);
                     const mp3Base64 = mp3Buffer.toString('base64');
-
-                    // Limpieza
                     fs.unlinkSync(inputPath);
                     fs.unlinkSync(outputPath);
-
-                    console.log("✅ Audio convertido exitosamente.");
-
-                    resolve({
-                        mimetype: 'audio/mp3',
-                        data: mp3Base64,
-                        filename: 'audio.mp3'
-                    });
-                } catch (err) {
-                    reject(err);
-                }
+                    resolve({ mimetype: 'audio/mp3', data: mp3Base64, filename: 'audio.mp3' });
+                } catch (err) { reject(err); }
             })
             .save(outputPath);
     });
 }
 
-// --- FUNCIÓN HELPER PARA PROCESAR MEDIA ---
+// --- UTIL: PROCESAR MEDIA ---
 async function procesarMedia(msg) {
     let media = null;
-
     if (msg.hasMedia) {
         media = await msg.downloadMedia();
     } else if (msg.hasQuotedMsg) {
         const quotedMsg = await msg.getQuotedMessage();
-        if (quotedMsg.hasMedia) {
-            media = await quotedMsg.downloadMedia();
-        }
+        if (quotedMsg.hasMedia) media = await quotedMsg.downloadMedia();
     }
 
-    if (media) {
-        // Detectar audios (Whatsapp suele usar audio/ogg; codecs=opus)
-        if (media.mimetype.startsWith('audio') || media.mimetype.includes('ogg')) {
-            try {
-                return await convertirAudioAMp3(media);
-            } catch (error) {
-                console.error("⚠️ Falló la conversión de audio, enviando original:", error.message);
-                return media;
-            }
+    if (media && (media.mimetype.startsWith('audio') || media.mimetype.includes('ogg'))) {
+        try {
+            return await convertirAudioAMp3(media);
+        } catch (error) {
+            console.error("⚠️ Falló conversión audio (usando original):", error.message);
+            return media;
         }
     }
-
     return media;
 }
 
-// --- HELPER PARA RESOLVER NÚMEROS ---
+// --- UTIL: OBTENER NÚMERO REAL (LID FIX) ---
 async function obtenerNumeroReal(msg, client) {
-    // 1. CASO PROPIO: Si el mensaje es mío (del bot), usar info del cliente
-    if (msg.fromMe) {
-        if (client.info && client.info.wid) {
-            return client.info.wid.user;
-        }
+    // 1. Si soy yo mismo
+    if (msg.fromMe && client.info && client.info.wid) {
+        return client.info.wid.user;
     }
 
-    // 2. OBTENER ID CANDIDATO
+    // 2. Si ya viene el número limpio (@c.us)
     let idCandidato = msg.author || msg.from;
-
-    // Si ya es un teléfono (@c.us), lo usamos directo
     if (idCandidato && idCandidato.includes('@c.us')) {
         return idCandidato.replace(/\D/g, '');
     }
 
-    // 3. BUSCAR EN METADATA OCULTA (_data)
-    // A veces id.participant tiene el número real aunque author tenga el LID
+    // 3. Buscar en metadata oculta
     if (msg._data) {
-        if (msg._data.id && msg._data.id.participant && msg._data.id.participant.includes('@c.us')) {
-            return msg._data.id.participant.replace(/\D/g, '');
-        }
-        // Fallback extra para algunos casos de grupo
-        if (msg._data.participant && msg._data.participant.includes('@c.us')) {
-            return msg._data.participant.replace(/\D/g, '');
-        }
+        if (msg._data.id?.participant?.includes('@c.us')) return msg._data.id.participant.replace(/\D/g, '');
+        if (msg._data.participant?.includes('@c.us')) return msg._data.participant.replace(/\D/g, '');
     }
 
-    // 4. INYECCIÓN BROWSER
-    // Buscamos en el Store de Contactos de WhatsApp Web
+    // 4. Inyección en Browser (Para amigos con LIDs)
     try {
         const telefonoMapeado = await client.pupPage.evaluate((targetId) => {
             try {
-                // Aseguramos formato LID si es solo números
                 if (!targetId.includes('@')) targetId = targetId + '@lid';
-
                 const wid = window.Store.WidFactory.createWid(targetId);
 
-                // Estrategia A: LidUtils (Para mapeo LID -> Phone)
-                if (window.Store.LidUtils && window.Store.LidUtils.getPhoneNumber) {
+                // Estrategia A: LidUtils
+                if (window.Store.LidUtils?.getPhoneNumber) {
                     const pn = window.Store.LidUtils.getPhoneNumber(wid);
-                    if (pn && pn.user) return pn.user; // Devolvemos SOLO el número string
+                    if (pn && pn.user) return pn.user;
                 }
-
-                // Estrategia B: Buscar en Contact Store
+                // Estrategia B: Contact Store
                 const contact = window.Store.Contact.get(wid);
                 if (contact) {
-                    if (contact.userid) return contact.userid; // Mejor propiedad para user real
+                    if (contact.userid) return contact.userid;
                     if (contact.phoneNumber) return contact.phoneNumber;
-                    if (contact.id && contact.id.user && contact.id.server === 'c.us') {
-                        return contact.id.user;
-                    }
+                    if (contact.id?.user && contact.id.server === 'c.us') return contact.id.user;
                 }
                 return null;
             } catch(e) { return null; }
         }, idCandidato);
 
-        // Verificamos que sea TEXTO antes de usar replace (Aquí fallaba antes)
         if (telefonoMapeado && typeof telefonoMapeado === 'string') {
             return telefonoMapeado.replace(/\D/g, '');
         }
     } catch (e) {
-        console.error("⚠️ Falló resolución profunda de LID:", e.message);
+        // Fallo silencioso en inyección
     }
 
-    // 5. FALLBACK FINAL: Devolvemos lo que haya
+    // 5. Fallback
     return idCandidato ? idCandidato.replace(/\D/g, '') : "Desconocido";
 }
 
@@ -253,126 +210,101 @@ const client = new Client({
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--disable-features=NetworkService',
-            '--disable-features=NetworkServiceInProcess'
+            '--disable-features=NetworkService'
         ]
     }
 });
 
-client.on('qr', (qr) => qrcode.generate(qr, { small: true }));
+// Eventos de conexión
+client.on('qr', (qr) => {
+    console.log("📲 Escanea el código QR:");
+    qrcode.generate(qr, { small: true });
+});
+
+client.on('loading_screen', (percent, message) => {
+    console.log(`⌛ Cargando WhatsApp: ${percent}% (${message})`);
+});
+
+client.on('authenticated', () => {
+    console.log('🔐 Autenticación exitosa.');
+});
+
 client.on('ready', () => console.log('✅ Whemini está listo y conectado.'));
 
+// Lógica de Mensajes
 client.on('message_create', async (msg) => {
     try {
         if (msg.timestamp < TIMESTAMP_INICIO) return;
 
         const mensaje = msg.body.trim();
 
-        // --- COMANDO: INFO ---
+        // --- COMANDOS BÁSICOS ---
         if (mensaje === '!info') {
-            const infoMsg = `📊 *Estado de Whemini*\n\n` +
-                            `🧠 *Modelo:* \`${nombreModeloActual}\`\n` +
-                            `📏 *Límite Tokens:* ${limiteTokensActual}\n` +
-                            `📥 *In:* ${totalTokensInput}\n` +
-                            `📤 *Out:* ${totalTokensOutput}\n` +
-                            `📈 *Total:* ${totalTokensInput + totalTokensOutput}`;
+            const infoMsg = `📊 *Estado de Whemini*\n🧠 Modelo: \`${nombreModeloActual}\`\n📏 Tokens Max: ${limiteTokensActual}\n📈 Uso: ${totalTokensInput} in / ${totalTokensOutput} out`;
             await msg.reply(infoMsg);
             return;
         }
 
-        // --- COMANDO: TOKENS ---
         if (mensaje.startsWith('!tokens ')) {
-            const arg = mensaje.slice(8).trim();
-            const nuevoLimite = parseInt(arg);
-            if (!isNaN(nuevoLimite) && nuevoLimite > 0 && nuevoLimite <= 8192) {
-                limiteTokensActual = nuevoLimite;
-                if (cargarModelo(nombreModeloActual)) {
-                    await msg.reply(`✅ *Límite actualizado.*\nNuevos tokens máximos: ${limiteTokensActual}.`);
-                }
-            } else {
-                await msg.reply("❌ Número inválido.");
+            const arg = parseInt(mensaje.slice(8).trim());
+            if (!isNaN(arg) && arg > 0 && arg <= 8192) {
+                limiteTokensActual = arg;
+                if (cargarModelo(nombreModeloActual)) await msg.reply(`✅ Tokens ajustados a: ${limiteTokensActual}`);
             }
             return;
         }
 
-        // --- COMANDO: MODELO ---
         if (mensaje.startsWith('!modelo ')) {
             const alias = mensaje.slice(8).trim().toLowerCase();
             const nombreTecnico = MODELOS_DISPONIBLES[alias];
             if (nombreTecnico) {
-                if (cargarModelo(nombreTecnico)) {
-                    await msg.reply(`✅ Cambio exitoso a: \`${nombreTecnico}\`.`);
-                }
+                if (cargarModelo(nombreTecnico)) await msg.reply(`✅ Modelo cambiado a: \`${nombreTecnico}\``);
             } else {
-                const lista = Object.keys(MODELOS_DISPONIBLES).map(k => `• ${k}`).join('\n');
-                await msg.reply(`❌ Modelo no válido. Opciones:\n${lista}`);
+                await msg.reply(`❌ Modelos: ${Object.keys(MODELOS_DISPONIBLES).join(', ')}`);
             }
             return;
         }
 
-        // --- COMANDO: RESET ---
         if (mensaje === '!reset') {
-            const chat = await msg.getChat();
-            const chatId = chat.id._serialized;
+            const chatId = (await msg.getChat()).id._serialized;
             if (chatSesiones[chatId]) delete chatSesiones[chatId];
-            await msg.reply("🤖 Whemini: *Memoria reiniciada.*");
+            await msg.reply("🤖 *Memoria reiniciada.*");
             return;
         }
 
-        // --- INTERACCIÓN CON EL BOT ---
-        const esComandoBot = mensaje.toLowerCase().startsWith('!bot');
-
-        if (esComandoBot) {
+        // --- LÓGICA IA ---
+        if (mensaje.toLowerCase().startsWith('!bot')) {
             const consulta = mensaje.slice(4).trim();
             const chat = await msg.getChat();
             const chatId = chat.id._serialized;
 
-            // --- IDENTIFICACIÓN DEL USUARIO ---
+            // 1. Identificar Usuario
             const numeroUsuario = await obtenerNumeroReal(msg, client);
             const nombreUsuario = msg._data.notifyName || "Usuario";
 
-            // LOGUEO DETALLADO
-            let logTexto = consulta;
-            if (!logTexto && (msg.hasMedia || msg.hasQuotedMsg)) {
-                logTexto = "[Archivo Adjunto/Citado]";
-            }
-            console.log(`📩 [${nombreModeloActual}] De: ${numeroUsuario} (${nombreUsuario}) en ${chat.name || chatId}: "${logTexto}"`);
-
+            console.log(`📩 [${nombreModeloActual}] De: ${numeroUsuario} (${nombreUsuario}): "${consulta || '[Media]'}"`);
             chat.sendStateTyping();
 
-            // 1. Procesar Media
+            // 2. Procesar Media
             const mediaData = await procesarMedia(msg);
 
-            // 2. Construir Contexto de Identidad
-            const contextoUsuario = `[Sistema: El mensaje proviene del número +${numeroUsuario}, el usuario se llama "${nombreUsuario}". Úsalo si es relevante para responder].\n\n`;
-
-            // 3. Construir Payload para Gemini
+            // 3. Preparar Prompt
+            const contextoUsuario = `[Sistema: Mensaje de +${numeroUsuario}, nombre "${nombreUsuario}"].\n`;
             let geminiPayload = [];
 
             if (mediaData) {
-                console.log(`📎 Media adjunto: ${mediaData.mimetype}`);
-                const filePart = {
-                    inlineData: {
-                        data: mediaData.data,
-                        mimeType: mediaData.mimetype
-                    }
-                };
-                geminiPayload.push(filePart);
+                geminiPayload.push({
+                    inlineData: { data: mediaData.data, mimeType: mediaData.mimetype }
+                });
             }
 
             if (consulta) {
-                // Inyectamos el contexto antes del texto del usuario
                 geminiPayload.push(contextoUsuario + consulta);
             } else if (mediaData) {
-                // Prompt por defecto si solo hay media, con contexto incluido
                 let promptMedia = contextoUsuario;
-                if (mediaData.mimetype.startsWith('audio')) {
-                    promptMedia += "Escucha este audio atentamente, pone en texto todo lo que dice y responde o resume su contenido.";
-                } else if (mediaData.mimetype.startsWith('image')) {
-                    promptMedia += "Describe esta imagen.";
-                } else {
-                    promptMedia += "Analiza este archivo.";
-                }
+                if (mediaData.mimetype.startsWith('audio')) promptMedia += "Transcribe este audio y responde.";
+                else if (mediaData.mimetype.startsWith('image')) promptMedia += "Describe esta imagen.";
+                else promptMedia += "Analiza este archivo.";
                 geminiPayload.push(promptMedia);
             }
 
@@ -388,41 +320,29 @@ client.on('message_create', async (msg) => {
 
             const text = response.text();
 
-            // --- LÓGICA DE MENCIONES (TAGGING) ---
-            // Basado en Client.js: pasamos un array de IDs serializados en las options.
+            // 5. Procesar Menciones (@numero)
             const mentions = [];
-
-            // Regex busca patrones @numero (ej: @54911223344)
             const patronMencion = /@(\d+)/g;
             let match;
-
             while ((match = patronMencion.exec(text)) !== null) {
-                const numeroEncontrado = match[1];
-                // Construimos el ID serializado standard de WhatsApp (@c.us)
-                // Esto permite taggear gente NO agendada.
-                const serializedId = `${numeroEncontrado}@c.us`;
-                mentions.push(serializedId);
+                mentions.push(`${match[1]}@c.us`);
             }
 
-            // 5. Responder a WhatsApp con las menciones procesadas
             await msg.reply(text, undefined, { mentions: mentions });
-
             chat.clearState();
         }
 
     } catch (error) {
-        console.error("❌ Error:", error);
-        if (msg.body.startsWith('!bot')) {
-            await msg.reply(`🤖 Whemini: ⚠️ Error: ${error.message}`);
-        }
+        console.error("❌ Error en mensaje:", error);
+        if (msg.body.startsWith('!bot')) await msg.reply(`🤖 Error: ${error.message}`);
     }
 });
 
-// --- ESPERA DE SEGURIDAD ---
+// --- INICIO ---
 const SEGUNDOS_DE_ESPERA = 5;
-console.log(`⏳ Esperando ${SEGUNDOS_DE_ESPERA} segundos...`);
+console.log(`⏳ Iniciando en ${SEGUNDOS_DE_ESPERA}s...`);
 
 setTimeout(() => {
-    console.log("🚀 Iniciando...");
+    console.log("🚀 Iniciando cliente...");
     client.initialize();
 }, SEGUNDOS_DE_ESPERA * 1000);
